@@ -1,0 +1,325 @@
+#!/bin/bash
+DATE=$(date '+%Y%m%d%H%M%S')
+#ansible variables holding passwords
+password_list="ansible_user_password mariadb_root_password mariadb_glpi_password password_glpi_glpi password_glpi_glpi_default password_glpi_postonly password_glpi_tech password_glpi_normal mariadb_itop_password itop_root_password mariadb_centreon_password centreon_nagvis_password password_centreon_admin mariadb_birt_password password_birt_user password_birt_admin"
+set -f
+password_list_array=($password_list)
+set +f
+#newly added ansible variables holding passwords
+password_list_new=""
+set -f
+password_list_new_array=($password_list_new)
+set +f
+#command options related
+itsm_release="v1.0.10"
+devel_mode="0"
+releases_list="0"
+clean_install="0"
+get_help() {
+        echo "ansible-init.sh [--release=release_name] [--dev] [--list] [--clean] [--help]"
+	echo "		[--help] - print this help and exit"
+        echo "		[--release=release_name] - release name to extract, default v1.0.1"
+        echo "		[--dev] - development mode, do not generate random passwords at the moment"
+        echo "		[--list] - list available releases(tags/branches) and exit"
+        echo "          [--listpass] - list platform url/usr/pass and exit"
+	echo "		[--clean] - do a clean install do not keep inventory and user prop files"
+}
+
+
+for cmdopts in "$@"
+do
+case $cmdopts in
+    -r=*|--release=*)
+		#tag to get
+                itsm_release="${cmdopts#*=}"
+                shift
+    ;;
+    --dev)
+		#development mode
+                devel_mode="1"
+                shift
+    ;;
+    --list)
+		#list of available tags/branches
+                releases_list="1"
+                shift
+    ;;
+   --listpass)
+		#list installation urls/user and pass
+		if [[ -s /root/ansible/vars_from_file.yml && -s /root/ansible/vars_from_file_user.yml ]]; then
+			#getting ip addresses
+			ansible_ip=$(cat /root/ansible/inventory |grep '^ansible'| awk '{print $2}'|awk -F= '{print $2}')
+			repo_ip=$(cat /root/ansible/inventory |grep '^srvrepo'| awk '{print $2}'|awk -F= '{print $2}')
+			glpi_ip=$(cat /root/ansible/inventory |grep '^srvglpi'| awk '{print $2}'|awk -F= '{print $2}')
+			itop_ip=$(cat /root/ansible/inventory |grep '^srvitop'| awk '{print $2}'|awk -F= '{print $2}')
+			centreon_ip=$(cat /root/ansible/inventory |grep '^centreon_central'| awk '{print $2}'|awk -F= '{print $2}')
+			centreon_db_ip=$(cat /root/ansible/inventory |grep '^centreon_db'| awk '{print $2}'|awk -F= '{print $2}')
+			selenium_ip=$(cat /root/ansible/inventory |grep '^centreon_selenium1'| awk '{print $2}'|awk -F= '{print $2}')
+			#getting user/pass
+			my_temp_vars=$(mktemp)
+			cat /root/ansible/vars_from_file.yml /root/ansible/vars_from_file_user.yml >${my_temp_vars}
+			glpi_pass=$(tac ${my_temp_vars} | grep -m 1 'password_glpi_glpi:' | awk '{print $2}')
+			itop_pass=$(tac ${my_temp_vars} | grep -m 1 'itop_root_password:' | awk '{print $2}')
+			centreon_pass=$(tac ${my_temp_vars} | grep -m 1 'password_centreon_admin:' | awk '{print $2}')	
+			echo ""
+			echo "Platform URL/user/pass are (all info is valid only after full install)"
+			echo ""
+			echo -e "Repo:\n http://${repo_ip}/"
+			echo ""
+			echo -e "GLPI:\n http://${glpi_ip}/glpi/  \n user: glpi   \n password: ${glpi_pass}"
+			echo ""
+			echo -e "ITOP:\n http://${itop_ip}/itop/  \n user: admin   \n password: ${itop_pass}"
+			echo ""
+			echo -e "Centreon:\n http://${centreon_ip}/centreon/  \n user: admin   \n password: ${centreon_pass}"
+			echo ""
+			echo -e "Centreon Nagvis:\n http://${centreon_ip}/nagvis/  \n user: admin   \n password: admin"	
+			echo ""
+			echo -e "Centreon DB IP:\n ${centreon_db_ip}"
+                        echo ""
+                        echo -e "Selenium IP:\n ${selenium_ip}"
+			echo ""
+			echo -e "Birt reporting:\n http://${ansible_ip}/"
+			echo ""
+			\rm -f ${my_temp_vars} 
+			exit
+		else 
+			echo "Unable to extract passwords list"
+			exit 
+		fi
+    ;;	 	
+   --clean)
+		#do not keep any files from previous install
+		clean_install="1"	
+		shift
+    ;;		
+   --help)
+		get_help
+		exit
+    ;;	
+    *)
+         echo "Unknown option ${cmdopts}"
+         get_help
+	 exit 1
+    ;;
+esac
+done
+
+
+ask() {
+    # https://djm.me/ask
+	local prompt default reply
+
+	while true; do
+
+        	if [ "${2:-}" = "Y" ]; then
+            		prompt="Y/n"
+            		default=Y
+        	elif [ "${2:-}" = "N" ]; then
+            		prompt="y/N"
+            		default=N
+        	else
+            		prompt="y/n"
+            		default=
+        	fi
+
+        # Ask the question (not using "read -p" as it uses stderr not stdout)
+        	echo -n "$1 [$prompt] "
+
+        # Read the answer (use /dev/tty in case stdin is redirected from somewhere else)
+        	read reply </dev/tty
+
+        # Default?
+        	if [ -z "$reply" ]; then
+            		reply=$default
+        	fi
+
+        # Check if the reply is valid
+        	case "$reply" in
+            		Y*|y*) return 0 ;;
+            		N*|n*) return 1 ;;
+        	esac
+
+	done
+}
+
+git_cleanup()
+{
+	echo "Doing ansible/git cleanup"
+	find /root/ansible -name "*.swo" -delete 2>/dev/null
+	find /root/ansible -name "*.swp" -delete 2>/dev/null
+	find /root/ansible -name "*.retry" -delete 2>/dev/null
+	find /root/ansible -name ".git" -exec rm -rf {} \; 2>/dev/null
+}
+#Script should be started as root
+if [ "$EUID" -ne 0 ]; then 
+	echo "Please run as root"
+	exit
+fi
+
+#Script start
+echo "Ansible host initial preparation script"
+echo ""
+
+#Checking Internet connection
+echo "Checking Internet connection"
+echo ""
+curl https://www.google.com --silent -q -k >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+	echo "Internet seems to be available good"
+else
+	if ask "Internet seems to be not available, continue?" N; then
+		echo "Continuing witout internet may lead to undesired results"	
+	else
+		exit 1
+	fi
+
+fi
+echo "Creating ssh keys for root user ..."
+echo ""
+if [ -e /root/.ssh/id_rsa ]; then
+	if ask "Key file /root/.ssh/id_rsa already present, recreate?" N; then
+		echo "Recreating the key..."
+		echo ""
+    		\rm -f /root/.ssh/id_rsa
+		ssh-keygen -t rsa -b 4096 -C "ansible_itsm" -q -N "" -f /root/.ssh/id_rsa	
+	else
+    		echo "Keeping existing key ..."
+		echo ""
+	fi
+else
+	ssh-keygen -t rsa -b 4096 -C "ansible_itsm" -q -N "" -f /root/.ssh/id_rsa
+fi
+echo ""
+
+echo "Creating known_hosts file for root user..."
+echo ""
+if [ -e /root/.ssh/known_hosts ]; then
+	if ask "/root/.ssh/known_hosts already present, recreate?" N; then
+		echo "Recreating they known hosts"
+		echo ""
+		touch /root/.ssh/known_hosts; chmod 600 /root/.ssh/known_hosts
+	else
+		echo "Keeping existing known_hosts ..."
+		echo ""
+	fi	
+else
+	echo "Creating known_hosts file ..."
+	echo ""
+	touch /root/.ssh/known_hosts; chmod 600 /root/.ssh/known_hosts		
+fi
+echo ""
+
+echo "Installing git & ansible ..."
+echo ""
+yum makecache fast &>/dev/null
+yum install git ansible -y &>/dev/null
+
+echo ""
+if [[ ! -x /usr/bin/ansible || ! -x /usr/bin/git ]]; then
+	echo "Something wrong no git or ansble installed"
+	exit 1
+fi
+if [[ ${releases_list} == "1" ]]; then
+        echo "Available releases"
+	git ls-remote https://itsmdeploy:c6Fkf78DyMLYEDY8@git.brainsdirect.com/git/ansible.git
+	exit 0
+fi
+chkconfig --add snmpd &>/dev/null
+chkconfig --add ntpd &>/dev/null
+chkconfig snmpd on &>/dev/null
+chkconfig ntpd on &>/dev/null
+
+echo "Adjusting ansible config ..."
+echo ""
+sed -i -e 's/^#log_path.*/log_path = \/var\/log\/ansible.log/g' /etc/ansible/ansible.cfg
+sed -i -e 's/^#inventory.*/inventory = \/root\/ansible\/inventory/g' /etc/ansible/ansible.cfg
+echo "Adding ansible user ..."
+echo ""
+useradd ansible -d /home/ansible
+echo ""
+
+echo "Creating ssh keys for ansible user ..."
+echo ""
+if [ -e /home/ansible/.ssh/id_rsa ]; then
+	 if ask "/home/ansible/.ssh/known_hosts already present, recreate?" N; then
+		\rm -f /home/ansible/.ssh/id_rsa
+		ssh-keygen -t rsa -b 4096 -C "ansible_itsm" -q -N "" -f /home/ansible/.ssh/id_rsa
+		chown ansible:ansible /home/ansible/.ssh -R
+	else
+		echo "Keeping exiting /home/ansible/.ssh/known_hosts"
+		echo ""
+	fi
+else
+		mkdir -p /home/ansible/.ssh/
+                ssh-keygen -t rsa -b 4096 -C "ansible_itsm" -q -N "" -f /home/ansible/.ssh/id_rsa
+                touch /home/ansible/.ssh/known_hosts; chmod 600 /home/ansible/.ssh/known_hosts
+                chown ansible:ansible /home/ansible/.ssh -R
+fi
+echo "Cloning ansible scripts ..."
+echo ""
+if [ -d /root/ansible ]; then
+	if ask "Ansible scripts already present, recreate?" Y; then
+		echo "Backing up original inventory file"
+		echo ""
+		\mv /root/ansible /root/${DATE}_ansible
+		echo "Refreshing ansible scripts getting version $itsm_release of ISOS"
+                echo ""
+		cd /root; git clone --branch "${itsm_release}" https://itsmdeploy:c6Fkf78DyMLYEDY8@git.brainsdirect.com/git/ansible.git
+                if [ $? -ne 0 ]; then
+			echo "Something went wrong during git clone.... please check then retry ...."
+			exit 1
+		fi
+		if [[ "$clean_install" == "0" ]]; then
+			echo "Restoring original inventory file, new inventory file will renamed as /root/ansible/new_inventory"
+			\mv /root/ansible/inventory /root/ansible/new_inventory
+			\cp /root/${DATE}_ansible/inventory /root/ansible/
+                	\cp /root/${DATE}_ansible/vars_from_file_user.yml /root/ansible/
+		fi
+		if [[ "$devel_mode" == "0" ]]; then
+        		for i in "${password_list_array[@]}"; do
+               			old_value="$(grep -e ${i}: /root/${DATE}_ansible/vars_from_file.yml |grep -ve '^$')"
+               			if [ ! -z "$old_value" ]; then
+                       			sed -i -e "s/.*${i}:.*/$old_value/g" /root/ansible/vars_from_file.yml 
+               			fi
+        		done
+			#do we have any new password variables which are not initialized?
+			for i in "${password_list_array[@]}"; do
+        			grep -e "${i}.*default_pass123" /root/ansible/vars_from_file.yml 
+        			if [ $? -eq 0 ]; then
+					random_pass=$(tr -d -c 'a-zA-Z0-9' < /dev/urandom | head -c 20)
+                                	sed -i -e "s/${i}:.*$/${i}: ${random_pass}/g" /root/ansible/vars_from_file.yml
+        			fi
+			done	
+		fi
+		git_cleanup
+	else
+		echo "Keeping the ansible scripts intact ...."
+		echo ""
+	fi
+else
+	cd /root; git clone --branch "${itsm_release}" https://itsmdeploy:c6Fkf78DyMLYEDY8@git.brainsdirect.com/git/ansible.git
+        if [ $? -ne 0 ]; then
+        	echo "Something went wrong during git clone..... please check then retry ...."
+        	exit 1
+	fi
+        is_updated=1
+	if [[ "$devel_mode" == "0" ]]; then
+	for i in "${password_list_array[@]}"; do
+        	grep -e "${i}.*default_pass123" /root/ansible/vars_from_file.yml
+        	if [ $? -eq 0 ]; then
+        		echo "Passwords not updated, updating"
+			for i in "${password_list_array[@]}"; do
+                		random_pass=$(tr -d -c 'a-zA-Z0-9' < /dev/urandom | head -c 20)
+                		sed -i -e "s/${i}:.*$/${i}: ${random_pass}/g" /root/ansible/vars_from_file.yml
+        		done
+                	break
+        	fi
+	done
+        fi
+	git_cleanup	 
+        
+fi
+echo "$itsm_release" >/root/ansible/isos_release
+echo ""
+echo "Init finished"
+
